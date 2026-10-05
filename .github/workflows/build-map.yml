@@ -1,0 +1,136 @@
+# Weekly builds the Doctor Navigation map from fresh OpenStreetMap data and publishes a release.
+# The app fetches the latest map from these permanent links:
+#   https://github.com/vasyl-pryimak/dr-nav-maps/releases/latest/download/manifest.json
+#   https://github.com/vasyl-pryimak/dr-nav-maps/releases/latest/download/ukraine.drg
+name: Build map
+
+on:
+  schedule:
+    - cron: "0 3 * * 1" # every Monday at 03:00 UTC (Geofabrik updates data nightly)
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Build even if a release for this date already exists (replaces it)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # create and delete releases
+
+concurrency:
+  group: build-map
+  cancel-in-progress: false
+
+env:
+  REGION: ukraine
+  GEOFABRIK: https://download.geofabrik.de/europe
+  KEEP_RELEASES: 4 # how many recent maps to keep; older ones are deleted
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Geofabrik data date
+        id: date
+        run: |
+          date=$(curl -fsSL --retry 3 "$GEOFABRIK/$REGION.html" \
+            | grep -oE 'data up to [0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1 | awk '{print $4}')
+          if [ -z "$date" ]; then
+            echo "::error::Could not determine the data date from the Geofabrik page"
+            exit 1
+          fi
+          echo "OSM data up to $date"
+          echo "date=$date" >> "$GITHUB_OUTPUT"
+          echo "tag=map-$date" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether a build is needed
+        id: need
+        run: |
+          tag="${{ steps.date.outputs.tag }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            if [ "${{ github.event.inputs.force }}" = "true" ]; then
+              echo "Release $tag exists, but force is set — rebuilding"
+              echo "build=true" >> "$GITHUB_OUTPUT"
+              echo "replace=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "Release $tag already exists — no new data, skipping"
+              echo "build=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Java 17
+        if: steps.need.outputs.build == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Gradle
+        if: steps.need.outputs.build == 'true'
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Test and build map-builder
+        if: steps.need.outputs.build == 'true'
+        run: ./gradlew test installDist --console=plain
+
+      - name: Download OSM data
+        if: steps.need.outputs.build == 'true'
+        run: |
+          mkdir -p data out
+          cd data
+          curl -fL --retry 3 --retry-delay 30 -o "$REGION-latest.osm.pbf" "$GEOFABRIK/$REGION-latest.osm.pbf"
+          curl -fsSL --retry 3 -o "$REGION-latest.osm.pbf.md5" "$GEOFABRIK/$REGION-latest.osm.pbf.md5"
+          md5sum -c "$REGION-latest.osm.pbf.md5"
+          ls -lh
+
+      - name: Build the road graph
+        if: steps.need.outputs.build == 'true'
+        run: |
+          build/install/map-builder/bin/map-builder \
+            "data/$REGION-latest.osm.pbf" "out/$REGION.drg" \
+            --manifest out/manifest.json --osm-date "${{ steps.date.outputs.date }}"
+          cat out/manifest.json
+          ls -lh out
+
+      - name: Release
+        if: steps.need.outputs.build == 'true'
+        run: |
+          tag="${{ steps.date.outputs.tag }}"
+          date="${{ steps.date.outputs.date }}"
+          if [ "${{ steps.need.outputs.replace }}" = "true" ]; then
+            gh release delete "$tag" --cleanup-tag --yes
+          fi
+          size_mb=$(( $(jq -r .size out/manifest.json) / 1024 / 1024 ))
+          cat > notes.md <<EOF
+          Ukraine map for Doctor Navigation. OpenStreetMap data as of **$date**.
+
+          | | |
+          |---|---|
+          | Format | version $(jq -r .formatVersion out/manifest.json) |
+          | Size | $size_mb MB |
+          | Road edges | $(jq -r .edges out/manifest.json) |
+          | Places | $(jq -r .places out/manifest.json) |
+          | House numbers | $(jq -r .houses out/manifest.json) |
+          | SHA-256 | \`$(jq -r .sha256 out/manifest.json)\` |
+
+          Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright), licensed under [ODbL](https://opendatacommons.org/licenses/odbl/). Source: [Geofabrik](https://download.geofabrik.de/europe/ukraine.html).
+          EOF
+          gh release create "$tag" "out/$REGION.drg" out/manifest.json \
+            --title "Ukraine map $date" --notes-file notes.md --latest
+
+      - name: Remove old maps
+        if: steps.need.outputs.build == 'true'
+        run: |
+          gh release list --limit 100 --json tagName --jq '.[].tagName' \
+            | grep '^map-' | sort -r | tail -n +$((KEEP_RELEASES + 1)) \
+            | while read -r old; do
+                echo "Deleting old release $old"
+                gh release delete "$old" --cleanup-tag --yes
+              done
