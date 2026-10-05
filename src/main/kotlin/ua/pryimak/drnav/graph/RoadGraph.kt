@@ -29,6 +29,7 @@ class RoadGraph private constructor(private val buf: ByteBuffer) {
     val placeCount: Int
     val houseCount: Int
     private val houseCellCount: Int
+    val oldNameCount: Int
 
     private val offPoints: Int
     private val offEdgeStart: Int
@@ -49,6 +50,8 @@ class RoadGraph private constructor(private val buf: ByteBuffer) {
     private val offHouseText: Int
     private val offHouseCellKeys: Int
     private val offHouseCellStart: Int
+    private val offHouseStreet: Int
+    private val offOldNames: Int
 
     init {
         buf.order(ByteOrder.LITTLE_ENDIAN)
@@ -71,6 +74,7 @@ class RoadGraph private constructor(private val buf: ByteBuffer) {
         houseCount = buf.getInt(64)
         houseCellCount = buf.getInt(68)
         val houseTextBytes = buf.getInt(72)
+        oldNameCount = buf.getInt(76)
 
         var off = GraphFormat.HEADER_INTS * 4
         offPoints = off; off += pointCount * 8
@@ -92,6 +96,8 @@ class RoadGraph private constructor(private val buf: ByteBuffer) {
         offHouseText = off; off += (houseTextBytes + 3) / 4 * 4
         offHouseCellKeys = off; off += houseCellCount * 4
         offHouseCellStart = off; off += (houseCellCount + 1) * 4
+        offHouseStreet = off; off += houseCount * 4
+        offOldNames = off; off += oldNameCount * 8
         require(off == buf.capacity()) { "пошкоджений файл: очікувалось $off байт, є ${buf.capacity()}" }
     }
 
@@ -140,6 +146,27 @@ class RoadGraph private constructor(private val buf: ByteBuffer) {
         val bytes = ByteArray(t - s)
         for (k in bytes.indices) bytes[k] = buf.get(offHouseText + s + k)
         return String(bytes, Charsets.UTF_8)
+    }
+
+    /** Street of the house (addr:street, else the village from addr:place) or null. */
+    fun houseStreet(i: Int): String? = nameAt(houseStreetIndex(i))
+
+    /** Name index of the house's street, comparable with [edgeNameIndex]; -1 - unknown. */
+    fun houseStreetIndex(i: Int): Int = buf.getInt(offHouseStreet + i * 4)
+
+    fun oldNameEdge(i: Int): Int = buf.getInt(offOldNames + i * 8)
+    fun oldNameIndex(i: Int): Int = buf.getInt(offOldNames + i * 8 + 4)
+
+    /** Former names of the edge (old_name), usually none. */
+    fun edgeOldNames(e: Int): List<String> {
+        var lo = 0; var hi = oldNameCount
+        while (lo < hi) {
+            val mid = (lo + hi) ushr 1
+            if (oldNameEdge(mid) < e) lo = mid + 1 else hi = mid
+        }
+        val out = ArrayList<String>(1)
+        while (lo < oldNameCount && oldNameEdge(lo) == e) nameAt(oldNameIndex(lo++))?.let(out::add)
+        return out
     }
 
     /** House numbers in the box - via the same grid as the roads. */

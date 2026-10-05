@@ -28,6 +28,11 @@ class GraphData(
     val houseLatE7: IntArray = IntArray(0),
     val houseLonE7: IntArray = IntArray(0),
     val houseNumber: List<String> = emptyList(),
+    /** Index into [names] of each house's street (addr:street, else addr:place), -1 - unknown. */
+    val houseStreet: IntArray = IntArray(houseLatE7.size) { -1 },
+    /** Former names: pairs (edge, index into [names]), any order. */
+    val oldNameEdge: IntArray = IntArray(0),
+    val oldName: IntArray = IntArray(0),
 ) {
     val edgeCount get() = edgeFrom.size
     val pointCount get() = pointLatE7.size
@@ -39,6 +44,7 @@ object GraphWriter {
 
     fun write(g: GraphData, file: File, cellM: Double = DEFAULT_CELL_M) {
         require(g.edgePointStart.size == g.edgeCount + 1)
+        require(g.houseStreet.size == g.houseLatE7.size && g.oldName.size == g.oldNameEdge.size)
 
         // --- node adjacency ---
         val degree = IntArray(g.nodeCount)
@@ -139,7 +145,7 @@ object GraphWriter {
                     GraphFormat.MAGIC, GraphFormat.VERSION, g.nodeCount, g.edgeCount, g.pointCount,
                     cellCount, pairCount, adjacency.size, minLat, minLon, cellLatE7, cellLonE7, cols,
                     g.names.size, nameBytes.size, g.placeLatE7.size,
-                    houseOrder.size, hCellKeys.size, houseTextBytes.size,
+                    houseOrder.size, hCellKeys.size, houseTextBytes.size, g.oldNameEdge.size,
                 ),
             )
             for (i in 0 until g.pointCount) { w.int(g.pointLatE7[i]); w.int(g.pointLonE7[i]) }
@@ -166,6 +172,8 @@ object GraphWriter {
             repeat((4 - houseTextBytes.size % 4) % 4) { w.bytes(byteArrayOf(0)) }
             w.ints(hCellKeys.toArray())
             w.ints(hCellStart.toArray())
+            for (i in houseOrder) w.int(g.houseStreet[i])
+            for (i in g.oldNameEdge.indices.sortedBy { g.oldNameEdge[it] }) { w.int(g.oldNameEdge[i]); w.int(g.oldName[i]) }
             w.flush()
         }
     }

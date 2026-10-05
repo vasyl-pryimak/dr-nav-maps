@@ -11,7 +11,7 @@ The app first reads the small `manifest.json` and downloads the map only if it i
 
 ```json
 {
-  "formatVersion": 4,
+  "formatVersion": 5,
   "region": "ukraine",
   "osmDate": "2026-09-29",
   "file": "ukraine.drg",
@@ -20,6 +20,7 @@ The app first reads the small `manifest.json` and downloads the map only if it i
   "edges": 4336446,
   "places": 28937,
   "houses": 1694818,
+  "oldNames": 269988,
   "attribution": "© OpenStreetMap contributors, ODbL"
 }
 ```
@@ -28,7 +29,8 @@ The app first reads the small `manifest.json` and downloads the map only if it i
 - **Roads for cars**: from motorways to residential streets, service roads and dirt tracks. One-way traffic, roundabouts, bridges and tunnels are taken into account.
 - **Street and road names**: `name:uk`, otherwise `name`, plus the route number (`ref`).
 - **Settlements**: cities, towns, villages, city districts.
-- **House numbers**: from building outlines and standalone address points.
+- **House numbers**: from building outlines and standalone address points, each with its street (`addr:street`, or `addr:place` for villages without street names) — ~74 % of them have one.
+- **Former road names** (`old_name`) for address search: after the renamings many people still search by the old name.
 - **Spatial grid** of ~250 m for fast "what's nearby" lookups. The file is read via mmap.
 
 The format is described in [`GraphFormat.kt`](src/main/kotlin/ua/pryimak/drnav/graph/GraphFormat.kt).

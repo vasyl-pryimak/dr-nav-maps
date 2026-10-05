@@ -103,6 +103,39 @@ class RoadGraphTest {
     }
 
     @Test
+    fun `house streets and old names`() {
+        val f = File.createTempFile("addr", ".drg").apply { deleteOnExit() }
+        GraphWriter.write(
+            GraphData(
+                nodeCount = 3,
+                pointLatE7 = intArrayOf(GraphFormat.toE7(50.0), GraphFormat.toE7(50.001), GraphFormat.toE7(50.002)),
+                pointLonE7 = intArrayOf(GraphFormat.toE7(30.0), GraphFormat.toE7(30.0), GraphFormat.toE7(30.0)),
+                edgePointStart = intArrayOf(0, 2, 3), edgeFrom = intArrayOf(0, 1), edgeTo = intArrayOf(1, 2),
+                edgeFlags = ByteArray(2) { EdgeFlags.pack(RoadClass.RESIDENTIAL, false, false, false).toByte() },
+                edgeName = intArrayOf(0, 0),
+                names = listOf("вулиця Героїв", "вулиця Леніна", "Гора", "вулиця Стара"),
+                houseLatE7 = intArrayOf(GraphFormat.toE7(50.0005), GraphFormat.toE7(50.0015), GraphFormat.toE7(50.0018)),
+                houseLonE7 = intArrayOf(GraphFormat.toE7(30.0001), GraphFormat.toE7(30.0001), GraphFormat.toE7(30.0001)),
+                houseNumber = listOf("1", "2", "3"),
+                houseStreet = intArrayOf(0, 2, -1),
+                // written unsorted on purpose: the writer sorts by edge
+                oldNameEdge = intArrayOf(1, 0, 1),
+                oldName = intArrayOf(1, 1, 3),
+            ),
+            f,
+        )
+        val g = RoadGraph.open(f)
+        val byNumber = (0 until g.houseCount).associateBy { g.houseNumber(it) }
+        assertEquals("вулиця Героїв", g.houseStreet(byNumber.getValue("1")))
+        assertEquals(g.edgeNameIndex(0), g.houseStreetIndex(byNumber.getValue("1")))
+        assertEquals("Гора", g.houseStreet(byNumber.getValue("2")))
+        assertEquals(null, g.houseStreet(byNumber.getValue("3")))
+        assertEquals(3, g.oldNameCount)
+        assertEquals(listOf("вулиця Леніна"), g.edgeOldNames(0))
+        assertEquals(setOf("вулиця Леніна", "вулиця Стара"), g.edgeOldNames(1).toSet())
+    }
+
+    @Test
     fun `nothing far from roads`() {
         assertTrue(cross().nearby(50.1, 30.1, 100.0).isEmpty())
     }

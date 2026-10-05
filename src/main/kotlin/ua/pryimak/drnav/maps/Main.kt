@@ -82,12 +82,18 @@ private class WayCollector(private val noTracks: Boolean) : BinaryParser() {
     val names = ArrayList<String>()
     private val nameIndex = HashMap<String, Int>()
 
-    private fun intern(n: String?): Int = if (n == null) -1 else nameIndex.getOrPut(n) { names.add(n); names.size - 1 }
+    fun intern(n: String?): Int = if (n == null) -1 else nameIndex.getOrPut(n) { names.add(n); names.size - 1 }
+
+    /** Former names of each road (old_name), for address search: indices into [names], [oldStart] per way. */
+    val oldStart = IntList(1 shl 16).apply { add(0) }
+    val oldName = IntList(1 shl 12)
 
     /** Buildings with a number: outline (nodes) and the number itself. The coordinate is computed later as the outline centroid. */
     val houseRefs = LongList(1 shl 20)
     val houseStart = IntList(1 shl 16).apply { add(0) }
     val houseNumber = ArrayList<String>()
+    /** addr:street, else addr:place (villages without street names), or null. */
+    val houseStreet = ArrayList<String?>()
 
     override fun parseWays(list: List<Osmformat.Way>) {
         for (w in list) {
@@ -105,15 +111,24 @@ private class WayCollector(private val noTracks: Boolean) : BinaryParser() {
             wayStart.add(refs.size)
             flags.add(road.flags)
             reverse.add(if (road.reverse) 1 else 0)
-            name.add(intern(roadName(tags)))
+            val current = roadName(tags)
+            name.add(intern(current))
+            for (old in oldNames(tags)) if (old != current) oldName.add(intern(old))
+            oldStart.add(oldName.size)
         }
     }
 
     private fun collectHouse(w: Osmformat.Way) {
         if (w.refsCount < 3) return
         var number: String? = null
+        var street: String? = null
+        var place: String? = null
         for (i in 0 until w.keysCount) {
-            if (getStringById(w.getKeys(i)) == "addr:housenumber") { number = getStringById(w.getVals(i)); break }
+            when (getStringById(w.getKeys(i))) {
+                "addr:housenumber" -> number = getStringById(w.getVals(i))
+                "addr:street" -> street = getStringById(w.getVals(i))
+                "addr:place" -> place = getStringById(w.getVals(i))
+            }
         }
         val n = number?.let(::cleanHouseNumber) ?: return
         var ref = 0L
@@ -123,6 +138,7 @@ private class WayCollector(private val noTracks: Boolean) : BinaryParser() {
         }
         houseStart.add(houseRefs.size)
         houseNumber.add(n)
+        houseStreet.add(street ?: place)
     }
 
     override fun parseDense(nodes: Osmformat.DenseNodes) = Unit
@@ -132,7 +148,7 @@ private class WayCollector(private val noTracks: Boolean) : BinaryParser() {
     override fun complete() = Unit
 }
 
-internal class House(val latE7: Int, val lonE7: Int, val number: String)
+internal class House(val latE7: Int, val lonE7: Int, val number: String, val street: String?)
 
 /** "12", "12A", "3/5"; long descriptions instead of a number are dropped — they would only clutter the map. */
 internal fun cleanHouseNumber(raw: String): String? {
@@ -178,16 +194,22 @@ private class NodeCollector(private val ids: LongArray) : BinaryParser() {
             // dense node tags: key,val pairs (string indices), 0 ends a node
             val start = kv
             var hasPlace = false
+            var number: String? = null
+            var street: String? = null
+            var addrPlace: String? = null
             while (kv < kvCount) {
                 val k = nodes.getKeysVals(kv++)
                 if (k == 0) break
                 when (getStringById(k)) {
                     "place" -> hasPlace = true
-                    "addr:housenumber" -> cleanHouseNumber(getStringById(nodes.getKeysVals(kv)))?.let {
-                        houses.add(House(GraphFormat.toE7(parseLat(la)), GraphFormat.toE7(parseLon(lo)), it))
-                    }
+                    "addr:housenumber" -> number = getStringById(nodes.getKeysVals(kv))
+                    "addr:street" -> street = getStringById(nodes.getKeysVals(kv))
+                    "addr:place" -> addrPlace = getStringById(nodes.getKeysVals(kv))
                 }
                 kv++
+            }
+            number?.let(::cleanHouseNumber)?.let {
+                houses.add(House(GraphFormat.toE7(parseLat(la)), GraphFormat.toE7(parseLon(lo)), it, street ?: addrPlace))
             }
             if (hasPlace) {
                 val end = kv
@@ -207,7 +229,7 @@ private class NodeCollector(private val ids: LongArray) : BinaryParser() {
             val tags = (0 until n.keysCount).associate { getStringById(n.getKeys(it)) to getStringById(n.getVals(it)) }
             maybePlace({ tags }, n.lat, n.lon)
             tags["addr:housenumber"]?.let(::cleanHouseNumber)?.let {
-                houses.add(House(GraphFormat.toE7(parseLat(n.lat)), GraphFormat.toE7(parseLon(n.lon)), it))
+                houses.add(House(GraphFormat.toE7(parseLat(n.lat)), GraphFormat.toE7(parseLon(n.lon)), it, tags["addr:street"] ?: tags["addr:place"]))
             }
         }
     }
@@ -252,9 +274,11 @@ private fun buildGraph(ways: WayCollector, ids: LongArray, nodes: NodeCollector,
     val edgeFrom = IntList(1 shl 18); val edgeTo = IntList(1 shl 18)
     val edgeFlags = ByteList(1 shl 18)
     val edgeName = IntList(1 shl 18)
+    val oldNameEdge = IntList(1 shl 12)
+    val oldName = IntList(1 shl 12)
 
     val piece = IntList(256)
-    fun emit(flags: Int, reverse: Boolean, nameIdx: Int) {
+    fun emit(flags: Int, reverse: Boolean, nameIdx: Int, way: Int) {
         if (piece.size < 2) return
         val order = IntArray(piece.size) { piece[it] }.also { if (reverse) it.reverse() }
         val lat = IntArray(order.size) { nodes.lat[order[it]] }
@@ -268,6 +292,10 @@ private fun buildGraph(ways: WayCollector, ids: LongArray, nodes: NodeCollector,
         edgeTo.add(nodeOf(order.last()))
         edgeFlags.add(flags.toByte())
         edgeName.add(nameIdx)
+        for (k in ways.oldStart[way] until ways.oldStart[way + 1]) {
+            oldNameEdge.add(edgeName.size - 1)
+            oldName.add(ways.oldName[k])
+        }
     }
 
     for (w in 0 until wayCount) {
@@ -277,16 +305,16 @@ private fun buildGraph(ways: WayCollector, ids: LongArray, nodes: NodeCollector,
         piece.clear()
         for (r in ways.wayStart[w] until ways.wayStart[w + 1]) {
             if (!valid(r)) {
-                emit(flags, reverse, nameIdx); piece.clear()
+                emit(flags, reverse, nameIdx, w); piece.clear()
                 continue
             }
             val i = refIdx[r]
             piece.add(i)
             if (piece.size > 1 && isJunction(i)) {
-                emit(flags, reverse, nameIdx); piece.clear(); piece.add(i)
+                emit(flags, reverse, nameIdx, w); piece.clear(); piece.add(i)
             }
         }
-        emit(flags, reverse, nameIdx)
+        emit(flags, reverse, nameIdx, w)
     }
 
     return GraphData(
@@ -299,6 +327,8 @@ private fun buildGraph(ways: WayCollector, ids: LongArray, nodes: NodeCollector,
         edgeFlags = edgeFlags.toArray(),
         edgeName = edgeName.toArray(),
         names = ways.names,
+        oldNameEdge = oldNameEdge.toArray(),
+        oldName = oldName.toArray(),
     )
 }
 
@@ -328,12 +358,12 @@ private fun houseCentroids(ways: WayCollector, ids: LongArray, nodes: NodeCollec
             if (idx < 0 || nodes.lat[idx] == NodeCollector.MISSING) continue
             sumLat += nodes.lat[idx]; sumLon += nodes.lon[idx]; n++
         }
-        if (n > 0) out.add(House((sumLat / n).toInt(), (sumLon / n).toInt(), ways.houseNumber[h]))
+        if (n > 0) out.add(House((sumLat / n).toInt(), (sumLon / n).toInt(), ways.houseNumber[h], ways.houseStreet[h]))
     }
     return out
 }
 
-/** Add places and house numbers to the graph; place names go into the same table as street names. */
+/** Add places and house numbers to the graph; place names and house streets go into the same table as road names. */
 private fun withPlaces(g: GraphData, places: List<Place>, houses: List<House>): GraphData {
     val names = ArrayList(g.names)
     val index = HashMap<String, Int>().apply { names.forEachIndexed { i, n -> put(n, i) } }
@@ -351,6 +381,11 @@ private fun withPlaces(g: GraphData, places: List<Place>, houses: List<House>): 
         houseLatE7 = IntArray(houses.size) { houses[it].latE7 },
         houseLonE7 = IntArray(houses.size) { houses[it].lonE7 },
         houseNumber = houses.map { it.number },
+        houseStreet = IntArray(houses.size) { i ->
+            houses[i].street?.let { s -> index.getOrPut(s) { names.add(s); names.size - 1 } } ?: -1
+        },
+        oldNameEdge = g.oldNameEdge,
+        oldName = g.oldName,
     )
 }
 
@@ -366,6 +401,10 @@ internal fun roadName(tags: Map<String, String>): String? {
         else -> ref
     }
 }
+
+/** Former names (old_name:uk, else old_name); several are separated by ";". */
+internal fun oldNames(tags: Map<String, String>): List<String> =
+    (tags["old_name:uk"] ?: tags["old_name"])?.split(';')?.map(String::trim)?.filter(String::isNotEmpty)?.distinct().orEmpty()
 
 /** Douglas–Peucker in local metres. Returns the indices of the points kept (endpoints always kept). */
 internal fun simplify(latE7: IntArray, lonE7: IntArray, toleranceM: Double): IntArray {
@@ -439,6 +478,7 @@ private fun writeManifest(file: File, graphFile: File, g: RoadGraph, osmDate: St
           "edges": ${g.edgeCount},
           "places": ${g.placeCount},
           "houses": ${g.houseCount},
+          "oldNames": ${g.oldNameCount},
           "attribution": "© OpenStreetMap contributors, ODbL"
         }
         """.trimIndent() + "\n",
@@ -456,6 +496,10 @@ private fun printStats(g: RoadGraph) {
     for (i in 0 until g.placeCount) ranks[g.placeRank(i)]++
     println("Places: cities ${ranks[0]}, towns ${ranks[1]}, villages ${ranks[2]}, districts ${ranks[3]}")
     println("Cities near Kyiv: " + g.placesInBox(50.2, 30.2, 50.7, 30.9, 1).take(8).joinToString { g.placeName(it) })
+
+    val withStreet = (0 until g.houseCount).count { g.houseStreetIndex(it) >= 0 }
+    println("House numbers: ${g.houseCount}, with a street: $withStreet (${withStreet * 100L / maxOf(1, g.houseCount)} %)")
+    println("Former road names: ${g.oldNameCount}")
 
     val (lat, lon) = 50.4501 to 30.5234 // Maidan Nezalezhnosti (Independence Square)
     val hits = g.nearby(lat, lon, 60.0)
